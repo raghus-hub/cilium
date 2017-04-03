@@ -63,8 +63,7 @@ type Config struct {
 	KeepTemplates bool // Do not overwrite the template files
 
 	// Options changeable at runtime
-	Opts   *option.BoolOptions
-	OptsMU sync.RWMutex
+	Opts *option.BoolOptions
 }
 
 func NewConfig() *Config {

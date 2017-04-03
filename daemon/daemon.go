@@ -110,9 +110,6 @@ func (d *Daemon) GetConsumableCache() *policy.ConsumableCache {
 }
 
 func (d *Daemon) TracingEnabled() bool {
-	d.conf.OptsMU.RLock()
-	defer d.conf.OptsMU.RUnlock()
-
 	return d.conf.Opts.IsEnabled(options.PolicyTracing)
 }
 
@@ -121,9 +118,6 @@ func (d *Daemon) DryModeEnabled() bool {
 }
 
 func (d *Daemon) PolicyEnabled() bool {
-	d.conf.OptsMU.RLock()
-	defer d.conf.OptsMU.RUnlock()
-
 	return d.conf.Opts.IsEnabled(endpoint.OptionPolicy)
 }
 
@@ -357,13 +351,9 @@ func (d *Daemon) init() error {
 	f.Close()
 
 	if !d.DryModeEnabled() {
-		d.conf.OptsMU.RLock()
 		if err := d.compileBase(); err != nil {
-			d.conf.OptsMU.RUnlock()
 			return err
 		}
-		d.conf.OptsMU.RUnlock()
-
 		d.conf.LXCMap, err = lxcmap.OpenMap()
 		if err != nil {
 			log.Warningf("Could not create BPF endpoint map: %s", err)
@@ -608,8 +598,6 @@ func (h *patchConfig) Handle(params PatchConfigParams) middleware.Responder {
 	log.Debugf("PATCH /config request: %+v", params)
 
 	d := h.daemon
-	d.conf.OptsMU.Lock()
-	defer d.conf.OptsMU.Unlock()
 
 	if err := d.conf.Opts.Validate(params.Configuration); err != nil {
 		return apierror.Error(PatchConfigBadRequestCode, err)
@@ -657,8 +645,6 @@ func (h *getConfig) Handle(params GetConfigParams) middleware.Responder {
 	log.Debugf("GET /config request: %+v", params)
 
 	d := h.daemon
-	d.conf.OptsMU.RLock()
-	defer d.conf.OptsMU.RUnlock()
 
 	cfg := &models.DaemonConfigurationResponse{
 		Addressing:    d.getNodeAddressing(),
