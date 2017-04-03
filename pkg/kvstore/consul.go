@@ -338,6 +338,7 @@ func (c *ConsulClient) GASNewL3n4AddrID(basePath string, baseID uint32, lAddrID 
 
 // GetWatcher watches for kvstore changes in the given key. Triggers the returned channel
 // every time the key path is changed.
+// FIXME This function is highly tightened to the maxFreeID, change name accordingly
 func (c *ConsulClient) GetWatcher(key string, timeSleep time.Duration) <-chan []policy.NumericIdentity {
 	ch := make(chan []policy.NumericIdentity, 100)
 	go func() {
@@ -377,7 +378,10 @@ func (c *ConsulClient) GetWatcher(key string, timeSleep time.Duration) <-chan []
 			curSeconds = time.Second
 			qo.WaitIndex = q.LastIndex
 			go func() {
-				ch <- []policy.NumericIdentity{}
+				maxFreeID := uint32(0)
+				if err := json.Unmarshal(k.Value, &maxFreeID); err == nil {
+					ch <- []policy.NumericIdentity{policy.NumericIdentity(maxFreeID)}
+				}
 			}()
 		}
 	}()
