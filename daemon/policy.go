@@ -33,7 +33,7 @@ import (
 	"github.com/op/go-logging"
 )
 
-func (d *Daemon) GetCachedLabelList(ID policy.NumericIdentity) ([]labels.Label, error) {
+func (d *Daemon) GetCachedLabelList(ID policy.NumericIdentity) ([]*labels.Label, error) {
 	// Check if we have the source security context in our local
 	// consumable cache
 	if c := d.consumableCache.Lookup(ID); c != nil {

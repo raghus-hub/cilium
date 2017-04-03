@@ -120,11 +120,11 @@ func (ds *PolicyTestSuite) TestAddDelete(c *C) {
 
 var defaultCtx = &SearchContext{
 	Trace: TRACE_ENABLED,
-	From: []labels.Label{
-		labels.Label{Key: "id.foo", Source: "cilium"},
+	From: []*labels.Label{
+		{Key: "id.foo", Source: "cilium"},
 	},
-	To: []labels.Label{
-		labels.Label{Key: "id.bar", Source: "cilium"},
+	To: []*labels.Label{
+		{Key: "id.bar", Source: "cilium"},
 	},
 }
 
