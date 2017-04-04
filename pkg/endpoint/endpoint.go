@@ -139,15 +139,17 @@ func init() {
 }
 
 const (
-	StateCreating           = string(models.EndpointStateCreating)
-	StateDisconnected       = string(models.EndpointStateDisconnected)
-	StateWaitingForIdentity = string(models.EndpointStateWaitingForIdentity)
-	StateReady              = string(models.EndpointStateReady)
+	StateCreating               = string(models.EndpointStateCreating)
+	StateDisconnected           = string(models.EndpointStateDisconnected)
+	StateWaitingForIdentity     = string(models.EndpointStateWaitingForIdentity)
+	StateReady                  = string(models.EndpointStateReady)
+	StateRegenerating           = string(models.EndpointStateRegenerating)
 )
 
 // Endpoint contains all the details for a particular LXC and the host interface to where
 // is connected to.
 type Endpoint struct {
+	Mutex            sync.RWMutex          // Mutex is used for any RW operations made in this structure.
 	ID               uint16                // Endpoint ID.
 	DockerID         string                // Docker ID.
 	DockerNetworkID  string                // Docker network ID.
@@ -228,6 +230,8 @@ func (e *Endpoint) GetModel() *models.Endpoint {
 	if e == nil {
 		return nil
 	}
+	e.Mutex.RLock()
+	defer e.Mutex.RUnlock()
 
 	currentState := models.EndpointState(e.State)
 	if currentState == models.EndpointStateReady && e.Status.CurrentStatus() != OK {
@@ -424,6 +428,8 @@ func (e *EndpointStatus) DeepCopy() *EndpointStatus {
 }
 
 func (e *Endpoint) DeepCopy() *Endpoint {
+	e.Mutex.RLock()
+	defer e.Mutex.RUnlock()
 	cpy := &Endpoint{
 		ID:               e.ID,
 		DockerID:         e.DockerID,
@@ -467,13 +473,15 @@ func (e *Endpoint) DeepCopy() *Endpoint {
 	return cpy
 }
 
-func (e *Endpoint) StringID() string {
+func (e *Endpoint) StringIDLocked() string {
 	return strconv.Itoa(int(e.ID))
 }
 
 // SetID sets the endpoint's host local unique ID.
 func (e *Endpoint) SetID() {
+	e.Mutex.Lock()
 	e.ID = e.IPv6.EndpointID()
+	e.Mutex.Unlock()
 }
 
 func (e *Endpoint) GetIdentity() policy.NumericIdentity {
@@ -484,11 +492,13 @@ func (e *Endpoint) GetIdentity() policy.NumericIdentity {
 	return policy.InvalidIdentity
 }
 
-func (e *Endpoint) DirectoryPath() string {
+func (e *Endpoint) directoryPath() string {
 	return filepath.Join(".", fmt.Sprintf("%d", e.ID))
 }
 
 func (e *Endpoint) Allows(id policy.NumericIdentity) bool {
+	e.Mutex.RLock()
+	defer e.Mutex.RUnlock()
 	if e.Consumable != nil {
 		return e.Consumable.Allows(id)
 	}
@@ -496,7 +506,9 @@ func (e *Endpoint) Allows(id policy.NumericIdentity) bool {
 }
 
 // String returns endpoint on a JSON format.
-func (e Endpoint) String() string {
+func (e *Endpoint) String() string {
+	e.Mutex.RLock()
+	defer e.Mutex.RUnlock()
 	b, err := json.MarshalIndent(e, "", "  ")
 	if err != nil {
 		return err.Error()
@@ -508,11 +520,11 @@ func OptionChanged(key string, value bool, data interface{}) {
 	e := data.(*Endpoint)
 	switch key {
 	case OptionConntrack:
-		e.InvalidatePolicy()
+		e.invalidatePolicy()
 	}
 }
 
-func (e *Endpoint) ApplyOpts(opts map[string]string) bool {
+func (e *Endpoint) ApplyOptsLocked(opts map[string]string) bool {
 	return e.Opts.Apply(opts, OptionChanged, e) > 0
 }
 
@@ -566,8 +578,8 @@ func (epS *epSorter) Less(i, j int) bool {
 	return epS.by(epS.eps[i], epS.eps[j])
 }
 
-// Base64 returns the endpoint in a base64 format.
-func (e Endpoint) Base64() (string, error) {
+// base64 returns the endpoint in a base64 format.
+func (e *Endpoint) base64() (string, error) {
 	jsonBytes, err := json.Marshal(e)
 	if err != nil {
 		return "", err
@@ -575,8 +587,8 @@ func (e Endpoint) Base64() (string, error) {
 	return base64.StdEncoding.EncodeToString(jsonBytes), nil
 }
 
-// ParseBase64ToEndpoint parses the endpoint stored in the given base64 string.
-func ParseBase64ToEndpoint(str string, ep *Endpoint) error {
+// parseBase64ToEndpoint parses the endpoint stored in the given base64 string.
+func parseBase64ToEndpoint(str string, ep *Endpoint) error {
 	jsonBytes, err := base64.StdEncoding.DecodeString(str)
 	if err != nil {
 		return err
@@ -607,7 +619,7 @@ func ParseEndpoint(strEp string) (*Endpoint, error) {
 		return nil, fmt.Errorf("invalid format %q. Should contain a single ':'", strEp)
 	}
 	var ep Endpoint
-	if err := ParseBase64ToEndpoint(strEpSlice[1], &ep); err != nil {
+	if err := parseBase64ToEndpoint(strEpSlice[1], &ep); err != nil {
 		return nil, fmt.Errorf("failed to parse base64toendpoint: %s", err)
 	}
 
@@ -624,7 +636,7 @@ func PolicyMapPath(id int) string {
 }
 
 // PolicyMapPath returns the path to policy map of endpoint.
-func (e *Endpoint) PolicyMapPath() string {
+func (e *Endpoint) PolicyMapPathLocked() string {
 	return PolicyMapPath(int(e.ID))
 }
 
@@ -633,7 +645,7 @@ func Ct6MapPath(id int) string {
 }
 
 // Ct6MapPath returns the path to IPv6 connection tracking map of endpoint.
-func (e *Endpoint) Ct6MapPath() string {
+func (e *Endpoint) Ct6MapPathLocked() string {
 	return Ct6MapPath(int(e.ID))
 }
 
@@ -642,11 +654,15 @@ func Ct4MapPath(id int) string {
 }
 
 // Ct4MapPath returns the path to IPv4 connection tracking map of endpoint.
-func (e *Endpoint) Ct4MapPath() string {
+func (e *Endpoint) Ct4MapPathLocked() string {
 	return Ct4MapPath(int(e.ID))
 }
 
 func (e *Endpoint) LogStatus(typ StatusType, code StatusCode, msg string) {
+	e.Mutex.Lock()
+	defer e.Mutex.Unlock()
+	// FIXME instead of a mutex we could use a channel to send the status
+	// log message to a single writer?
 	e.Status.indexMU.Lock()
 	defer e.Status.indexMU.Unlock()
 	sts := &statusLogMsg{
@@ -661,6 +677,8 @@ func (e *Endpoint) LogStatus(typ StatusType, code StatusCode, msg string) {
 }
 
 func (e *Endpoint) LogStatusOK(typ StatusType, msg string) {
+	e.Mutex.Lock()
+	defer e.Mutex.Unlock()
 	e.Status.indexMU.Lock()
 	defer e.Status.indexMU.Unlock()
 	sts := &statusLogMsg{
@@ -684,39 +702,50 @@ func (e UpdateCompilationError) Error() string { return e.msg }
 
 // Update modifies the endpoint options and regenerates the program.
 func (e *Endpoint) Update(owner Owner, opts models.ConfigurationMap) error {
+	e.Mutex.Lock()
 	if err := e.Opts.Validate(opts); err != nil {
+		e.Mutex.Unlock()
 		return UpdateValidationError{err.Error()}
 	}
 
-	if opts != nil && !e.ApplyOpts(opts) {
+	if opts != nil && !e.ApplyOptsLocked(opts) {
+		e.Mutex.Unlock()
 		// No changes have been applied, skip update
 		return nil
 	}
+	e.Mutex.Unlock()
 
 	// FIXME: restore previous configuration on failure
-	if err := e.regenerateLocked(owner); err != nil {
-		return UpdateCompilationError{err.Error()}
-	}
+	e.Regenerate(owner)
 
 	return nil
 }
 
-func (e *Endpoint) Leave(owner Owner) {
+func (e *Endpoint) LeaveLocked(owner Owner) {
+	owner.RemoveFromEndpointQueue(e.ID)
 	if c := e.Consumable; c != nil && c.L4Policy != nil {
 		// Passing a new map of nil will purge all redirects
 		e.cleanUnusedRedirects(owner, c.L4Policy.Ingress, nil)
 		e.cleanUnusedRedirects(owner, c.L4Policy.Egress, nil)
 	}
 
-	e.RemoveDirectory()
+	e.removeDirectory()
+}
+
+func (e *Endpoint) removeDirectory() {
+	os.RemoveAll(e.directoryPath())
 }
 
 func (e *Endpoint) RemoveDirectory() {
-	os.RemoveAll(e.DirectoryPath())
+	e.Mutex.Lock()
+	e.removeDirectory()
+	e.Mutex.Unlock()
 }
 
 func (e *Endpoint) CreateDirectory() error {
-	lxcDir := e.DirectoryPath()
+	e.Mutex.Lock()
+	defer e.Mutex.Unlock()
+	lxcDir := e.directoryPath()
 	if err := os.MkdirAll(lxcDir, 0777); err != nil {
 		return fmt.Errorf("unable to create endpoint directory: %s", err)
 	}
@@ -725,9 +754,15 @@ func (e *Endpoint) CreateDirectory() error {
 }
 
 func (e *Endpoint) RegenerateIfReady(owner Owner) error {
+	e.Mutex.RLock()
 	if e.State != StateReady && e.State != StateWaitingForIdentity {
+		e.Mutex.RUnlock()
 		return nil
 	}
+	e.Mutex.RUnlock()
 
-	return e.Regenerate(owner)
+	// TODO: Should we change RegenerateIfReady to block/non-block like
+	// e.Regenerate?
+	e.Regenerate(owner)
+	return nil
 }

@@ -38,6 +38,7 @@ type Config struct {
 	BpfDir                string                  // BPF template files directory
 	LibDir                string                  // Cilium library files directory
 	RunDir                string                  // Cilium runtime directory
+	LXCMapMU              sync.Mutex              // LXCMapMU is the mutex to access the LXCMap FIXME move this to the LXCMap struct?
 	LXCMap                *lxcmap.LXCMap          // LXCMap where all LXCs are stored
 	NodeAddress           *addressing.NodeAddress // Node IPv6 Address
 	NAT46Prefix           *net.IPNet              // NAT46 IPv6 Prefix

@@ -15,22 +15,28 @@
 package types
 
 import (
+	"sync"
+
 	"github.com/cilium/cilium/pkg/labels"
 
 	dTypes "github.com/docker/engine-api/types"
-	k8sDockerLbls "k8s.io/client-go/1.5/pkg/kubelet/types"
 )
 
 type Container struct {
+	// Mutex internal mutex for the whole container structure
+	Mutex sync.RWMutex
 	dTypes.ContainerJSON
 	LabelsHash string
 	OpLabels   labels.OpLabels
 }
 
-func (c *Container) IsDockerOrInfracontainer() bool {
-	if c.Config != nil {
-		contName, exists := c.Config.Labels[k8sDockerLbls.KubernetesContainerNameLabel]
-		return !exists || contName == "POD"
+func NewContainer(dc *dTypes.ContainerJSON, l labels.Labels) *Container {
+	return &Container{
+		ContainerJSON: *dc,
+		OpLabels: labels.OpLabels{
+			Custom:        labels.Labels{},
+			Disabled:      labels.Labels{},
+			Orchestration: l.DeepCopy(),
+		},
 	}
-	return false
 }

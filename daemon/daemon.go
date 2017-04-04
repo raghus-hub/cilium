@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -80,6 +81,9 @@ type Daemon struct {
 	loopbackIPv4       net.IP
 	maxCachedLabelIDMU sync.RWMutex
 	maxCachedLabelID   policy.NumericIdentity
+	buildEndpointChan  chan *endpoint.Request
+	uniqueID           map[uint16]bool
+	uniqueIDMU         sync.Mutex
 	l7Proxy            *proxy.Proxy
 }
 
@@ -88,11 +92,61 @@ func (d *Daemon) GetProxy() *proxy.Proxy {
 }
 
 func (d *Daemon) WriteEndpoint(e *endpoint.Endpoint) error {
+	d.conf.LXCMapMU.Lock()
+	defer d.conf.LXCMapMU.Unlock()
 	if err := d.conf.LXCMap.WriteEndpoint(e); err != nil {
 		return fmt.Errorf("Unable to update eBPF map: %s", err)
 	}
 
 	return nil
+}
+
+func (d *Daemon) QueueEndpoint(req *endpoint.Request) {
+	go func(req *endpoint.Request) {
+		d.uniqueIDMU.Lock()
+		// We are skipping new requests, but only if the endpoint has not
+		// started its build process, since the endpoint is already in queue
+		if isBuilding, exists := d.uniqueID[req.ID]; !isBuilding && exists {
+			req.MyTurn <- false
+		} else {
+			// Mark endpoint in not building state and send it to
+			// the building queue
+			d.uniqueID[req.ID] = false
+			d.buildEndpointChan <- req
+		}
+		d.uniqueIDMU.Unlock()
+	}(req)
+}
+
+func (d *Daemon) RemoveFromEndpointQueue(epID uint16) {
+	d.uniqueIDMU.Lock()
+	delete(d.uniqueID, epID)
+	d.uniqueIDMU.Unlock()
+}
+
+func (d *Daemon) EndpointBuilder() {
+	log.Debugf("Creating %d worker threads", runtime.NumCPU())
+	// Create the same amount of worker threads as there are CPUs
+	for w := 0; w < runtime.NumCPU(); w++ {
+		go func() {
+			for e := range d.buildEndpointChan {
+				d.uniqueIDMU.Lock()
+				// Set the endpoint is building
+				d.uniqueID[e.ID] = true
+				e.MyTurn <- true
+				d.uniqueIDMU.Unlock()
+				// Wait for the endpoint to build
+				<-e.Done
+				d.uniqueIDMU.Lock()
+				if isBuilding := d.uniqueID[e.ID]; isBuilding {
+					// Delete the endpoint from the queue
+					// only if was marked as isBuilding
+					delete(d.uniqueID, e.ID)
+				}
+				d.uniqueIDMU.Unlock()
+			}
+		}()
+	}
 }
 
 func (d *Daemon) GetRuntimeDir() string {
@@ -486,7 +540,11 @@ func NewDaemon(c *Config) (*Daemon, error) {
 		consumableCache:   policy.NewConsumableCache(),
 		policy:            policy.Tree{},
 		ignoredContainers: make(map[string]int),
+		buildEndpointChan: make(chan *endpoint.Request, common.EndpointsPerHost),
+		uniqueID:          map[uint16]bool{},
 	}
+
+	d.EndpointBuilder()
 
 	d.listenForCiliumEvents()
 
@@ -540,19 +598,19 @@ func NewDaemon(c *Config) (*Daemon, error) {
 		d.IgnoreRunningContainers()
 	}
 
-	d.endpointsMU.Lock()
-	defer d.endpointsMU.Unlock()
-
+	d.endpointsMU.RLock()
 	walker := func(path string, _ os.FileInfo, _ error) error {
 		return d.staleMapWalker(path)
 	}
 	if err := filepath.Walk(bpf.MapPrefixPath(), walker); err != nil {
 		log.Warningf("Error while scanning for stale maps: %s", err)
 	}
+	d.endpointsMU.RUnlock()
 
 	return &d, nil
 }
 
+// call with d.endpointsMU.RLocked
 func (d *Daemon) checkStaleMap(path string, filename string, id string) {
 	if tmp, err := strconv.ParseUint(id, 0, 16); err == nil {
 		if _, ok := d.endpoints[uint16(tmp)]; !ok {
@@ -565,6 +623,7 @@ func (d *Daemon) checkStaleMap(path string, filename string, id string) {
 	}
 }
 
+// call with d.endpointsMU.RLocked
 func (d *Daemon) staleMapWalker(path string) error {
 	filename := filepath.Base(path)
 

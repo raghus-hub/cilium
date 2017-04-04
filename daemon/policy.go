@@ -64,9 +64,7 @@ func (d *Daemon) invalidateCache() {
 	}
 }
 
-func (d *Daemon) triggerPolicyUpdates(added []policy.NumericIdentity) {
-	d.endpointsMU.Lock()
-	defer d.endpointsMU.Unlock()
+func (d *Daemon) TriggerPolicyUpdates(added []policy.NumericIdentity) {
 
 	if len(added) == 0 {
 		log.Debugf("Full policy recalculation triggered")
@@ -77,21 +75,26 @@ func (d *Daemon) triggerPolicyUpdates(added []policy.NumericIdentity) {
 		d.invalidateCache()
 	}
 
-	log.Debugf("Iterating over endpoints...")
-
-	for _, ep := range d.endpoints {
-		log.Debugf("Triggering policy update for ep %s", ep.StringID())
-		err := ep.TriggerPolicyUpdates(d)
-		if err != nil {
-			log.Warningf("Error while handling policy updates for endpoint %s: %s\n",
-				ep.StringID(), err)
-			ep.LogStatus(endpoint.Policy, endpoint.Failure, err.Error())
-		} else {
-			ep.LogStatusOK(endpoint.Policy, "Policy regenerated")
-		}
+	d.endpointsMU.RLock()
+	for k := range d.endpoints {
+		go func(ep *endpoint.Endpoint) {
+			ep.Mutex.RLock()
+			epID := ep.StringIDLocked()
+			ep.Mutex.RUnlock()
+			policyChanges, err := ep.TriggerPolicyUpdates(d)
+			if err != nil {
+				log.Warningf("Error while handling policy updates for endpoint %s: %s\n",
+					epID, err)
+				ep.LogStatus(endpoint.Policy, endpoint.Failure, err.Error())
+			} else {
+				ep.LogStatusOK(endpoint.Policy, "Policy regenerated")
+			}
+			if policyChanges {
+				ep.Regenerate(d)
+			}
+		}(d.endpoints[k])
 	}
-
-	log.Debugf("End")
+	d.endpointsMU.RUnlock()
 }
 
 // PolicyCanConsume calculates if the ctx allows the consumer to be consumed. This public
@@ -104,7 +107,7 @@ func (d *Daemon) PolicyCanConsume(ctx *policy.SearchContext) (*policy.SearchCont
 	}
 	scr := policy.SearchContextReply{}
 	d.policy.Mutex.RLock()
-	scr.Decision = d.policy.Allows(ctx)
+	scr.Decision = d.policy.AllowsRLocked(ctx)
 	d.policy.Mutex.RUnlock()
 
 	if ctx.Trace != policy.TRACE_DISABLED {
@@ -133,7 +136,7 @@ func (h *getPolicyResolve) Handle(params GetPolicyResolveParams) middleware.Resp
 	}
 
 	d.policy.Mutex.RLock()
-	verdict := d.policy.Allows(&search)
+	verdict := d.policy.AllowsRLocked(&search)
 	d.policy.Mutex.RUnlock()
 
 	result := models.PolicyTraceResult{
@@ -147,16 +150,18 @@ func (h *getPolicyResolve) Handle(params GetPolicyResolveParams) middleware.Resp
 func (d *Daemon) enablePolicyEnforcement() {
 	d.conf.Opts.Set(endpoint.OptionPolicy, true)
 
-	d.endpointsMU.Lock()
-	defer d.endpointsMU.Unlock()
-
 	enablePolicy := map[string]string{endpoint.OptionPolicy: "enabled"}
 
+	d.endpointsMU.RLock()
 	for _, ep := range d.endpoints {
-		if ep.ApplyOpts(enablePolicy) {
+		ep.Mutex.Lock()
+		optionsChanged := ep.ApplyOptsLocked(enablePolicy)
+		ep.Mutex.Unlock()
+		if optionsChanged {
 			ep.RegenerateIfReady(d)
 		}
 	}
+	d.endpointsMU.RUnlock()
 }
 
 func (d *Daemon) PolicyAdd(path string, node *policy.Node) *apierror.APIError {
@@ -171,7 +176,7 @@ func (d *Daemon) PolicyAdd(path string, node *policy.Node) *apierror.APIError {
 		return apierror.Error(PutPolicyPathFailureCode, err)
 	} else if policyModified {
 		log.Info("New policy imported, regenerating...")
-		d.triggerPolicyUpdates([]policy.NumericIdentity{})
+		d.TriggerPolicyUpdates([]policy.NumericIdentity{})
 	}
 
 	return nil
@@ -193,7 +198,7 @@ func (d *Daemon) PolicyDelete(path, cover256Sum string) *apierror.APIError {
 		return apierror.New(DeletePolicyPathNotFoundCode, "policy not found")
 	}
 
-	d.triggerPolicyUpdates([]policy.NumericIdentity{})
+	d.TriggerPolicyUpdates([]policy.NumericIdentity{})
 	return nil
 }
 
